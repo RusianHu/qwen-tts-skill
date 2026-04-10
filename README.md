@@ -11,13 +11,13 @@
 
 ## 安装
 
-直接和你的 **claude code 、codex 、龙虾**说（推荐）
+一句话搞定，直接和你的 **claude code 、codex 、龙虾** 说（推荐）
 
 ```text
 帮我安装这个skill （https://github.com/RusianHu/qwen-tts-skill）
 ```
 
-安装项目依赖：
+手动安装项目依赖：
 
 ```bash
 pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e .
@@ -152,44 +152,6 @@ curl -X POST http://localhost:8825/v1/audio/speech \
 | `BASE_URL` | `https://qwen-qwen3-tts-demo.ms.show` | 远端 Qwen TTS Gradio 服务地址 |
 | `API_KEY` | - | REST API 鉴权密钥（可选） |
 
-## 项目结构
-
-```text
-qwen-tts-skill/
-├── SKILL.md              ← Claude Skill 入口（指令 + frontmatter）
-├── scripts/
-│   ├── qwen_tts_skill.py ← 独立核心实现（适配后端 + Python API + 可选 REST app）
-│   └── server.py         ← 可选 FastAPI 启动入口
-├── tests/
-│   └── test_skill.py     ← 测试用例
-├── verify.py             ← 验证脚本
-├── AGENTS.md             ← 开发者指南
-├── pyproject.toml        ← 依赖与打包配置
-└── README.md             ← 用户文档
-```
-
-## 测试
-
-运行测试：
-
-```bash
-pytest tests/test_skill.py -v
-```
-
-跳过集成测试（需要网络与上游服务可访问）：
-
-```bash
-set SKIP_INTEGRATION_TESTS=1
-pytest tests/test_skill.py -v
-```
-
-## 验证
-
-运行完整验证：
-
-```bash
-python verify.py
-```
 
 ## 兼容性说明
 
@@ -201,4 +163,4 @@ python verify.py
 
 ## 许可证
 
-本项目采用 MIT 许可证。详情请参阅 [LICENSE](LICENSE) 文件。
+[Apache-2.0](LICENSE)

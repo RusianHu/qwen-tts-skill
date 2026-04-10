@@ -1,85 +1,98 @@
-"""Tests for Qwen TTS Skill
+from __future__ import annotations
 
-Run tests with: pytest tests/test_skill.py -v
-"""
-
-import pytest
-import os
-import tempfile
-import time
+import sys
 from pathlib import Path
 
-# Add scripts to path
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
+import pytest
+import requests
 
-from qwen_tts_skill import QwenTTSSkill, TTSResult, skill_voices, skill_say
+BASE_DIR = Path(__file__).resolve().parent.parent
+SCRIPTS_DIR = BASE_DIR / "scripts"
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+import qwen_tts_skill as skill_module
+from qwen_tts_skill import QwenTTSSkill, TTSResult
 
 
-class TestQwenTTSSkill:
-    """Test suite for Qwen TTS Skill"""
-
-    @pytest.fixture
-    def skill(self):
-        """Create a skill instance for testing"""
+class TestSkillCore:
+    def test_skill_can_be_created_without_network(self):
         skill = QwenTTSSkill(port=18825, auto_start=False)
-        yield skill
-        # Cleanup
-        skill.stop_service()
 
-    def test_skill_initialization(self, skill):
-        """Test skill can be initialized"""
+        info = skill.get_api_info()
         assert skill.host == "127.0.0.1"
         assert skill.port == 18825
-        assert skill._base_url == "http://127.0.0.1:18825"
+        assert info["python_api_mode"] == "direct-backend"
+        assert info["rest_mode"] == "optional"
+        assert info["independent"] is True
+        assert info["backend"] == "internal-gradio-adapter"
 
-    def test_is_running_false_when_not_started(self, skill):
-        """Test is_running returns False when service not started"""
-        assert skill.is_running is False
+    def test_tts_result_can_save_file(self, tmp_path: Path):
+        output_path = tmp_path / "sample.wav"
+        result = TTSResult(success=True, audio_data=b"RIFFdemo")
 
-    @pytest.mark.skipif(
-        os.getenv("SKIP_INTEGRATION_TESTS"),
-        reason="Integration tests disabled"
-    )
-    def test_start_service(self, skill):
-        """Test service can be started (requires qwen-tts package)"""
-        result = skill.start_service(timeout=10)
-        # This may fail if qwen-tts is not installed
-        # But the skill structure should be correct
-        if result:
-            assert skill.is_running is True
+        saved = result.save_to_file(str(output_path))
 
-    def test_synthesize_without_service(self, skill):
-        """Test synthesis fails gracefully when service not running"""
-        result = skill.synthesize("Hello world")
-        # Should fail gracefully
-        assert isinstance(result, TTSResult)
+        assert saved is True
+        assert output_path.read_bytes() == b"RIFFdemo"
+        assert result.audio_path == str(output_path)
 
 
-class TestSkillFunctions:
-    """Test standalone skill functions"""
+class TestOptionalRestDependencies:
+    def test_build_missing_rest_dependencies_message_contains_install_hint(self):
+        message = skill_module.build_missing_rest_dependencies_message(
+            ["fastapi>=0.100.0", "uvicorn>=0.20.0"]
+        )
 
-    def test_skill_voices_returns_list_or_fails_gracefully(self):
-        """Test skill_voices function"""
-        try:
-            voices = skill_voices(port=18826)
-            assert isinstance(voices, list)
-        except Exception:
-            # Expected if service not running
-            pytest.skip("Service not available")
+        assert "缺少可选 REST 服务依赖" in message
+        assert "fastapi>=0.100.0" in message
+        assert "uvicorn>=0.20.0" in message
+        assert "pip install -e ." in message
 
+    def test_service_start_returns_false_when_rest_dependencies_missing(self, monkeypatch: pytest.MonkeyPatch):
+        service = skill_module.QwenTTSService(port=18826)
 
-class TestServerModule:
-    """Test the FastAPI server module"""
+        monkeypatch.setattr(
+            skill_module,
+            "get_missing_rest_dependencies",
+            lambda: ["fastapi>=0.100.0"],
+        )
+        monkeypatch.setattr(
+            skill_module.requests,
+            "get",
+            lambda *args, **kwargs: (_ for _ in ()).throw(requests.RequestException("offline")),
+        )
 
-    def test_server_imports(self):
-        """Test server module can be imported"""
-        try:
-            from server import app, create_speech, get_models
-            assert app is not None
-        except ImportError as e:
-            pytest.skip(f"Server dependencies not installed: {e}")
+        popen_called = False
 
+        def fake_popen(*args, **kwargs):
+            nonlocal popen_called
+            popen_called = True
+            raise AssertionError("缺少依赖时不应启动子进程")
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+        monkeypatch.setattr(skill_module.subprocess, "Popen", fake_popen)
+
+        started = service.start(wait=False)
+
+        assert started is False
+        assert popen_called is False
+
+    def test_create_app_raises_runtime_error_when_rest_dependencies_missing(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(
+            skill_module,
+            "get_missing_rest_dependencies",
+            lambda: ["fastapi>=0.100.0"],
+        )
+
+        with pytest.raises(RuntimeError, match="缺少可选 REST 服务依赖"):
+            skill_module.create_app(upstream_url="https://example.com")
+
+    def test_start_server_raises_runtime_error_when_rest_dependencies_missing(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setattr(
+            skill_module,
+            "get_missing_rest_dependencies",
+            lambda: ["uvicorn>=0.20.0"],
+        )
+
+        with pytest.raises(RuntimeError, match="缺少可选 REST 服务依赖"):
+            skill_module.start_server(port=18827)

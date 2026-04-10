@@ -1,27 +1,30 @@
 [project]
 name = "qwen-tts-skill"
-version = "0.1.0"
-description = "Claude Skill for Qwen TTS - OpenAI-compatible Text-to-Speech"
+version = "0.2.0"
+description = "Independent Python REST skill for Qwen TTS with an internal OpenAI-compatible adapter"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 dependencies = [
     "requests>=2.31.0",
-    "aiohttp>=3.9.0",
-    "aiofiles>=25.0.0",
     "gradio_client>=2.0.0",
-]
-
-[project.optional-dependencies]
-server = [
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
     "pydantic>=2.0.0",
 ]
+
+[project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
 ]
+
+[project.scripts]
+qwen-tts-skill = "qwen_tts_skill:main"
+
+[tool.setuptools]
+py-modules = ["qwen_tts_skill"]
+package-dir = {"" = "scripts"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
