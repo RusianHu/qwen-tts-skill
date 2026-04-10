@@ -1,6 +1,6 @@
 [project]
 name = "qwen-tts-skill"
-version = "0.2.0"
+version = "0.2.1"
 description = "Independent Python REST skill for Qwen TTS with an internal OpenAI-compatible adapter"
 readme = "README.md"
 requires-python = ">=3.10"

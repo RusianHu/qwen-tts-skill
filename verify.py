@@ -1,6 +1,6 @@
 """Verification script for Qwen TTS Skill.
 
-Run this script to verify the independent skill installation and basic functionality.
+Run this script to verify the self-contained skill installation and basic functionality.
 """
 
 from __future__ import annotations
@@ -12,6 +12,9 @@ BASE_DIR = Path(__file__).parent
 SCRIPTS_DIR = BASE_DIR / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
+
+
+DEPENDENCY_INSTALL_HINT = "pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt"
 
 
 def verify_imports() -> bool:
@@ -54,7 +57,7 @@ def verify_imports() -> bool:
             __import__(mod)
             print(f"  ✓ {mod}")
         except ImportError:
-            print(f"  ⚠ {mod} (install with 'pip install -e .')")
+            print(f"  ⚠ {mod} (install with '{DEPENDENCY_INSTALL_HINT}')")
 
     if errors:
         print("\n❌ Core import errors found:")
@@ -74,11 +77,15 @@ def verify_skill_structure() -> bool:
 
     required_files = [
         "SKILL.md",
-        "pyproject.toml",
         "README.md",
+        "requirements.txt",
         "scripts/qwen_tts_skill.py",
         "scripts/server.py",
         "tests/test_skill.py",
+    ]
+
+    optional_files = [
+        "pyproject.toml",
     ]
 
     all_exist = True
@@ -90,7 +97,15 @@ def verify_skill_structure() -> bool:
             print(f"  ✗ {file_path} (missing)")
             all_exist = False
 
-    print("\n✅ All required files present!" if all_exist else "\n❌ Some files are missing!")
+    print("\nOptional development files:")
+    for file_path in optional_files:
+        full_path = BASE_DIR / file_path
+        if full_path.exists():
+            print(f"  ✓ {file_path}")
+        else:
+            print(f"  ⚠ {file_path} (not required for self-contained skill usage)")
+
+    print("\n✅ All required files present!" if all_exist else "\n❌ Some required files are missing!")
     return all_exist
 
 
@@ -129,13 +144,15 @@ def verify_server_module() -> bool:
         from server import app as server_app
 
         local_app = create_app(upstream_url="https://example.com")
-        print("  ✓ create_app imported")
+        print("  ✓ create_app imported from scripts/qwen_tts_skill.py")
+        print("  ✓ server entrypoint imported from scripts/server.py")
         print(f"  ✓ Local FastAPI app: {local_app.title}")
         print(f"  ✓ Entrypoint FastAPI app: {server_app.title}")
+        print("  ✓ Direct script import path works without editable package installation")
         return True
     except ImportError as exc:
         print(f"  ✗ Import error: {exc}")
-        print("  Install with: pip install -e .")
+        print(f"  Install with: {DEPENDENCY_INSTALL_HINT}")
         return False
     except RuntimeError as exc:
         print(f"  ✗ Runtime error: {exc}")
@@ -171,7 +188,7 @@ def check_dependencies() -> bool:
 
     if missing:
         print(f"\n❌ Missing dependencies: {', '.join(missing)}")
-        print("  Install with: pip install -e .")
+        print(f"  Install with: {DEPENDENCY_INSTALL_HINT}")
         return False
 
     print("\n✅ All runtime dependencies installed!")
@@ -226,9 +243,9 @@ def main() -> int:
     if all_passed:
         print("\n🎉 All verifications passed!")
         print("\nNext steps:")
-        print("  1. Install dependencies: pip install -e .")
-        print("  2. Run tests: pytest tests/ -v")
-        print("  3. Use Python API directly: from qwen_tts_skill import QwenTTSSkill")
+        print(f"  1. If needed, install dependencies: {DEPENDENCY_INSTALL_HINT}")
+        print("  2. Run tests: pytest tests/test_skill.py -q")
+        print("  3. Use direct CLI: python scripts/qwen_tts_skill.py --say \"你好\" --output output.wav")
         print("  4. Start REST server only when needed: python scripts/server.py")
         return 0
 

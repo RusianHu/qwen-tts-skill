@@ -47,7 +47,14 @@ class TestOptionalRestDependencies:
         assert "缺少可选 REST 服务依赖" in message
         assert "fastapi>=0.100.0" in message
         assert "uvicorn>=0.20.0" in message
-        assert "pip install -e ." in message
+        assert "requirements.txt" in message
+        assert "pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt" in message
+
+    def test_server_entrypoint_imports_from_scripts_directory(self):
+        import server
+
+        assert callable(server.main)
+        assert server.HTTP_PORT == 8825
 
     def test_service_start_returns_false_when_rest_dependencies_missing(self, monkeypatch: pytest.MonkeyPatch):
         service = skill_module.QwenTTSService(port=18826)

@@ -71,7 +71,7 @@ def build_missing_rest_dependencies_message(missing_dependencies: List[str]) -> 
     return (
         "缺少可选 REST 服务依赖: "
         f"{', '.join(missing_dependencies)}。"
-        "请先执行 `pip install -e .` 安装项目依赖后再启动 REST 服务。"
+        "请先在当前 skill 根目录执行 `pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt` 安装依赖后再启动 REST 服务。"
     )
 
 
@@ -845,7 +845,7 @@ def create_app(
     app = FastAPI(
         title="Qwen TTS API",
         description="OpenAI-compatible Text-to-Speech API backed by the internal qwen-tts-skill adapter",
-        version="0.2.0",
+        version="0.2.1",
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -865,7 +865,7 @@ def create_app(
     async def index() -> Dict[str, Any]:
         return {
             "name": "Qwen TTS API",
-            "version": "0.2.0",
+            "version": "0.2.1",
             "backend": "internal-gradio-adapter",
             "upstream": backend.upstream_url,
             "independent": True,
