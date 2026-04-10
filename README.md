@@ -1,82 +1,131 @@
 # Qwen TTS Skill
 
-Claude Skill for Qwen TTS - 提供 OpenAI 兼容的文本转语音 REST API。
+ Python REST Skill for Qwen TTS。
 
-## 功能特性
+本项目基于 `qwen-tts-api` ，提供给你的 AI AGENT /自动化工具 语音生成服务，能力基于：
 
-- 🎤 **OpenAI API 兼容** - 兼容 `/v1/audio/speech` 端点
-- 🚀 **自动服务管理** - 自动启动/停止 Qwen TTS 服务
-- 🔊 **音色管理** - 获取和选择多种语音音色
-- 🌍 **多语言支持** - 支持多种语言自动检测和选择
-- 📦 **独立运行** - 可作为独立服务或技能组件使用
+- 将官方 Qwen TTS Gradio 接口适配为 Python 可直接调用的后端
+- 可选暴露为 OpenAI 兼容的 REST API
+- 提供便捷的 Python Skill API
+- 可单独启动 FastAPI 服务运行
 
 ## 安装
 
-```bash
-pip install -e .
+直接和你的 **claude code 、codex 、龙虾**说（推荐）
+
+```text
+帮我安装这个skill （https://github.com/RusianHu/qwen-tts-skill）
 ```
 
-依赖安装：
+安装项目依赖：
+
 ```bash
 pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -e .
 ```
 
+> 注意：项目不会在运行时自动执行 `pip install`。如果要使用可选 REST 服务，请先完成依赖安装。
+
+安装后将获得命令行入口：
+
+```bash
+qwen-tts-skill --help
+```
+
+## 架构说明
+
+当前项目的独立实现由两层组成：
+
+1. **内置 Python 适配后端**  
+   在 [`scripts/qwen_tts_skill.py`](scripts/qwen_tts_skill.py) 中实现：
+   - 发现远端 Gradio 的音色/语言枚举
+   - 调用 `/tts_interface` 完成合成
+   - 将结果转成统一的 [`TTSResult`](scripts/qwen_tts_skill.py:51)
+   - 这是 Python API 的默认调用路径
+
+2. **可选本地 OpenAI 风格 REST 服务**  
+   通过 [`create_app()`](scripts/qwen_tts_skill.py:703) 与 [`start_server()`](scripts/qwen_tts_skill.py:790) 暴露：
+   - `GET /v1/models`
+   - `GET /v1/voices`
+   - `POST /v1/audio/speech`
+   - `GET /health`
+
 ## 快速开始
 
-### 1. 作为 Python 模块使用
+### 1. 作为 Python 模块使用（默认直连后端）
 
 ```python
 from qwen_tts_skill import QwenTTSSkill
 
-# 方式一：使用上下文管理器
 with QwenTTSSkill() as skill:
-    result = skill.synthesize("你好，这是 Qwen TTS！")
-    if result.success:
-        print(f"音频已保存: {result.audio_path}")
-
-# 方式二：手动管理服务
-skill = QwenTTSSkill(port=8825)
-skill.start_service()
-result = skill.synthesize(
-    text="你好世界",
-    voice_id="vivian",
-    language_id="zh"
-)
-audio_path = result.audio_path
-skill.stop_service()
+    result = skill.synthesize(
+        text="你好，这是 Qwen TTS！",
+        voice="vivian",
+        language="zh",
+        output_path="output.wav",
+    )
+    print(result)
 ```
+
+这里的 Python 调用**默认不会启动本地 REST 服务**，而是直接调用内置后端。
 
 ### 2. 快速语音合成
 
 ```python
-from qwen_tts_skill import skill_say, skill_voices
+from qwen_tts_skill import skill_say, skill_voices, skill_languages
 
-# 一句话生成音频
-audio_path = skill_say("你好，世界！", voice="vivian")
+output = skill_say("你好，世界！", voice="vivian")
+print(output)
 
-# 获取可用音色
 voices = skill_voices()
-for voice in voices:
-    print(f"{voice['id']}: {voice['name']}")
+print(voices)
+
+languages = skill_languages()
+print(languages)
 ```
 
-### 3. 作为独立服务运行
+### 3. 作为独立 REST 服务运行（可选）
+
+在启动前，请确认已经执行过 [`pip install -e .`](README.md:26) 安装完整依赖；当前实现若检测到缺少 REST 依赖，会直接报错提示，而不会在运行时自动联网安装。
+
+#### 方式 A：直接运行 FastAPI 服务入口
 
 ```bash
-# 使用原始 qwen-tts
-python -m qwen_tts
-
-# 或使用本项目的 FastAPI 服务器
 python scripts/server.py
+```
+
+#### 方式 B：使用模块 CLI 以前台方式启动
+
+```bash
+python scripts/qwen_tts_skill.py --serve --host 0.0.0.0 --port 8825
+```
+
+#### 方式 C：使用安装后的命令行入口
+
+```bash
+qwen-tts-skill --serve --host 0.0.0.0 --port 8825
+```
+
+### 4. 可选 REST 服务管理
+
+```python
+from qwen_tts_skill import QwenTTSSkill
+
+skill = QwenTTSSkill(port=8825)
+skill.start_service()
+print(skill.get_api_info())
+skill.stop_service()
 ```
 
 ## API 端点
 
-服务启动后，可使用以下端点：
+仅在你显式启动 REST 服务后，可使用以下端点：
 
 | 端点 | 方法 | 描述 |
 |------|------|------|
+| `GET /` | GET | 服务信息 |
+| `GET /health` | GET | 健康检查 |
 | `GET /v1/models` | GET | 获取模型、音色、语言列表 |
+| `GET /v1/voices` | GET | 获取音色列表 |
 | `POST /v1/audio/speech` | POST | 文本转语音 |
 
 ### cURL 示例
@@ -98,23 +147,24 @@ curl -X POST http://localhost:8825/v1/audio/speech \
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `HTTP_PORT` | 8825 | 服务端口 |
-| `BASE_URL` | https://qwen-qwen3-tts-demo.ms.show | 上游 TTS 服务 |
-| `API_KEY` | - | API 密钥（可选） |
+| `HTTP_HOST` | `0.0.0.0` | REST 服务监听地址 |
+| `HTTP_PORT` | `8825` | REST 服务端口 |
+| `BASE_URL` | `https://qwen-qwen3-tts-demo.ms.show` | 远端 Qwen TTS Gradio 服务地址 |
+| `API_KEY` | - | REST API 鉴权密钥（可选） |
 
 ## 项目结构
 
-```
+```text
 qwen-tts-skill/
 ├── SKILL.md              ← Claude Skill 入口（指令 + frontmatter）
 ├── scripts/
-│   ├── qwen_tts_skill.py ← 核心实现（服务管理 + TTS 合成）
-│   └── server.py         ← FastAPI 独立服务器（可选）
+│   ├── qwen_tts_skill.py ← 独立核心实现（适配后端 + Python API + 可选 REST app）
+│   └── server.py         ← 可选 FastAPI 启动入口
 ├── tests/
 │   └── test_skill.py     ← 测试用例
 ├── verify.py             ← 验证脚本
 ├── AGENTS.md             ← 开发者指南
-├── pyproject.toml        ← 依赖配置
+├── pyproject.toml        ← 依赖与打包配置
 └── README.md             ← 用户文档
 ```
 
@@ -126,7 +176,7 @@ qwen-tts-skill/
 pytest tests/test_skill.py -v
 ```
 
-跳过集成测试（需要网络连接）：
+跳过集成测试（需要网络与上游服务可访问）：
 
 ```bash
 set SKIP_INTEGRATION_TESTS=1
@@ -141,6 +191,14 @@ pytest tests/test_skill.py -v
 python verify.py
 ```
 
+## 兼容性说明
+
+- 本项目仍然依赖**远端** Qwen TTS Gradio 服务进行最终音频生成
+- 但已经不再依赖**本地** `qwen-tts2api` 仓库、包安装或其进程启动
+- Python Skill 默认采用**直连后端**模式
+- OpenAI 风格 REST 能力作为**可选暴露层**保留
+- 当前实现**不会在运行时自动安装依赖**；缺少 REST 依赖时会直接给出明确提示，要求先完成安装
+
 ## 许可证
 
-MIT
+本项目采用 MIT 许可证。详情请参阅 [LICENSE](LICENSE) 文件。
