@@ -66,8 +66,8 @@ for voice in voices:
 # 使用原始 qwen-tts
 python -m qwen_tts
 
-# 或使用本项目的轻量级 FastAPI 服务
-python src/server.py
+# 或使用本项目的 FastAPI 服务器
+python scripts/server.py
 ```
 
 ## API 端点
@@ -106,16 +106,16 @@ curl -X POST http://localhost:8825/v1/audio/speech \
 
 ```
 qwen-tts-skill/
-├── src/
-│   ├── __init__.py
-│   ├── qwen_tts_skill.py    # 主要 Skill 实现
-│   └── server.py             # FastAPI 替代服务器
+├── SKILL.md              ← Claude Skill 入口（指令 + frontmatter）
+├── scripts/
+│   ├── qwen_tts_skill.py ← 核心实现（服务管理 + TTS 合成）
+│   └── server.py         ← FastAPI 独立服务器（可选）
 ├── tests/
-│   └── test_skill.py         # 测试用例
-├── verify.py                 # 验证脚本
-├── skill.json                # Claude Skill 配置
-├── pyproject.toml            # 项目配置
-└── README.md                 # 本文件
+│   └── test_skill.py     ← 测试用例
+├── verify.py             ← 验证脚本
+├── AGENTS.md             ← 开发者指南
+├── pyproject.toml        ← 依赖配置
+└── README.md             ← 用户文档
 ```
 
 ## 测试

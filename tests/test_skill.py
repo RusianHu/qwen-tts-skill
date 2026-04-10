@@ -9,9 +9,9 @@ import tempfile
 import time
 from pathlib import Path
 
-# Add src to path
+# Add scripts to path
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from qwen_tts_skill import QwenTTSSkill, TTSResult, skill_voices, skill_say
 

@@ -37,11 +37,23 @@ class VoiceInfo:
         return cls(id=vid, name=name)
 
 
+# 向后兼容别名
+Voice = VoiceInfo
+
+
+@dataclass
+class Language:
+    """语言选项"""
+    id: str
+    name: str
+
+
 @dataclass
 class TTSResult:
     """语音合成结果"""
     success: bool
     audio_data: Optional[bytes] = None
+    audio_path: Optional[str] = None
     content_type: Optional[str] = None
     voice_id: Optional[str] = None
     language_id: Optional[str] = None
@@ -352,13 +364,27 @@ class QwenTTSSkill:
         result.save_to_file("output.wav")
     """
 
-    def __init__(self, port: int = 8825):
-        self.service = QwenTTSService(port=port)
+    def __init__(self, port: int = 8825, host: str = None, api_key: Optional[str] = None, auto_start: bool = True):
+        self.service = QwenTTSService(host=host, port=port)
+        self.api_key = api_key
+        self.auto_start = auto_start
         self._auto_started = False
 
-    def start_service(self, wait: bool = True) -> bool:
+    @property
+    def host(self) -> str:
+        return self.service.host
+
+    @property
+    def port(self) -> int:
+        return self.service.port
+
+    @property
+    def is_running(self) -> bool:
+        return self.service.is_running
+
+    def start_service(self, wait: bool = True, timeout: int = 30) -> bool:
         """启动服务"""
-        return self.service.start(wait=wait)
+        return self.service.start(wait=wait, timeout=timeout)
 
     def stop_service(self) -> bool:
         """停止服务"""
@@ -368,8 +394,26 @@ class QwenTTSSkill:
         """确保服务在运行（自动启动）"""
         if self.service.is_running:
             return True
-        self._auto_started = True
-        return self.start_service()
+        if self.auto_start:
+            self._auto_started = True
+            return self.start_service()
+        return False
+
+    def get_voices(self, force_refresh: bool = False) -> Dict[str, str]:
+        """获取可用音色字典"""
+        if not self.ensure_running():
+            return {}
+        if force_refresh or not self.service._voices:
+            self.service.fetch_models()
+        return self.service._voices.copy() if self.service._voices else {}
+
+    def get_languages(self, force_refresh: bool = False) -> Dict[str, str]:
+        """获取可用语言字典"""
+        if not self.ensure_running():
+            return {}
+        if force_refresh or not self.service._languages:
+            self.service.fetch_models()
+        return self.service._languages.copy() if self.service._languages else {}
 
     def list_voices(self) -> List[Dict[str, str]]:
         """列出可用音色"""
@@ -411,7 +455,7 @@ class QwenTTSSkill:
         """
         self.ensure_running()
 
-        result = self.service.synthesize(text, voice, language, api_key)
+        result = self.service.synthesize(text, voice, language, api_key or self.api_key)
 
         response = {
             "success": result.success,
@@ -429,6 +473,32 @@ class QwenTTSSkill:
             response["audio_base64"] = base64.b64encode(result.audio_data).decode()
 
         return response
+
+    def quick_say(self, text: str, voice: Optional[str] = None, output_path: Optional[str] = None) -> Optional[str]:
+        """
+        快速语音合成
+
+        Args:
+            text: 要合成的文本
+            voice: 音色ID（可选）
+            output_path: 输出文件路径（可选）
+
+        Returns:
+            音频文件路径或 None
+        """
+        self.ensure_running()
+        result = self.service.synthesize(text, voice, "auto", self.api_key)
+
+        if result.success:
+            if output_path:
+                result.save_to_file(output_path)
+                return output_path
+            # 保存到临时文件
+            import tempfile
+            temp_path = tempfile.mktemp(suffix=".wav")
+            result.save_to_file(temp_path)
+            return temp_path
+        return None
 
     def get_api_info(self) -> Dict[str, Any]:
         """获取 API 信息"""
@@ -451,14 +521,14 @@ class QwenTTSSkill:
         return False
 
 
-# 便捷函数（顶层 API）
+# ============ 便捷函数（顶层 API） ============
 
 _service_instance: Optional[QwenTTSService] = None
 
 def get_service(port: int = 8825) -> QwenTTSService:
     """获取或创建服务实例"""
     global _service_instance
-    if _service_instance is None:
+    if _service_instance is None or _service_instance.port != port:
         _service_instance = QwenTTSService(port=port)
     return _service_instance
 
@@ -468,6 +538,64 @@ def ensure_service(port: int = 8825) -> bool:
     if not service.is_running:
         return service.start()
     return True
+
+def skill_start(port: int = 8825, auto_start: bool = True) -> QwenTTSSkill:
+    """
+    启动并返回一个 skill 实例
+
+    Args:
+        port: 服务端口
+        auto_start: 是否自动启动服务
+
+    Returns:
+        QwenTTSSkill 实例
+    """
+    skill = QwenTTSSkill(port=port, auto_start=auto_start)
+    if auto_start:
+        skill.start_service()
+    return skill
+
+def skill_say(text: str, voice: Optional[str] = None, port: int = 8825, output_path: Optional[str] = None) -> Optional[str]:
+    """
+    快速语音合成 - 一句话 TTS
+
+    Args:
+        text: 要合成的文本
+        voice: 音色ID（可选）
+        port: 服务端口
+        output_path: 输出文件路径（可选）
+
+    Returns:
+        音频文件路径或 None
+    """
+    with QwenTTSSkill(port=port, auto_start=True) as skill:
+        return skill.quick_say(text, voice, output_path)
+
+def skill_voices(port: int = 8825) -> List[Dict[str, str]]:
+    """
+    获取可用音色列表
+
+    Args:
+        port: 服务端口
+
+    Returns:
+        音色列表
+    """
+    with QwenTTSSkill(port=port, auto_start=True) as skill:
+        return skill.list_voices()
+
+def skill_languages(port: int = 8825) -> Dict[str, str]:
+    """
+    获取可用语言列表
+
+    Args:
+        port: 服务端口
+
+    Returns:
+        语言字典
+    """
+    with QwenTTSSkill(port=port, auto_start=True) as skill:
+        return skill.list_languages()
 
 def tts(
     text: str,
@@ -504,3 +632,54 @@ def tts(
 
 # 向后兼容别名
 QwenTTS = QwenTTSSkill
+
+
+# ============ CLI 接口 ============
+
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Qwen TTS Skill")
+    parser.add_argument("--start", action="store_true", help="启动服务")
+    parser.add_argument("--stop", action="store_true", help="停止服务")
+    parser.add_argument("--say", type=str, help="合成语音文本")
+    parser.add_argument("--voice", type=str, help="音色ID")
+    parser.add_argument("--language", type=str, help="语言ID")
+    parser.add_argument("--list-voices", action="store_true", help="列出可用音色")
+    parser.add_argument("--list-languages", action="store_true", help="列出可用语言")
+    parser.add_argument("--output", type=str, help="输出文件路径")
+    parser.add_argument("--port", type=int, default=8825, help="服务端口")
+
+    args = parser.parse_args()
+
+    skill = QwenTTSSkill(port=args.port)
+
+    if args.start:
+        success = skill.start_service()
+        print(f"服务 {'启动成功' if success else '启动失败'}")
+
+    elif args.stop:
+        success = skill.stop_service()
+        print(f"服务 {'已停止' if success else '未运行'}")
+
+    elif args.say:
+        result = skill.quick_say(args.say, args.voice, args.output)
+        if result:
+            print(f"音频已保存到: {result}")
+        else:
+            print("合成失败")
+
+    elif args.list_voices:
+        voices = skill.list_voices()
+        print("可用音色:")
+        for v in voices:
+            print(f"  - {v['id']}: {v['name']}")
+
+    elif args.list_languages:
+        languages = skill.list_languages()
+        print("可用语言:")
+        for lid, lname in languages.items():
+            print(f"  - {lid}: {lname}")
+
+    else:
+        parser.print_help()
