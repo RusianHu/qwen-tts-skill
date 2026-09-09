@@ -66,7 +66,9 @@ jobs:
 
       - name: Validate skill structure
         run: |
-          python -c "from skills_ref import validate; errors = validate('.'); assert errors == [], errors; print('skill spec: OK')"
+          # 注意不能传 '.'：skills-ref 以 Path(path).name 提取目录名，'.' 会得到
+          # 空字符串并与 skill name 不匹配；必须传入真实路径（basename=仓库名）
+          python -c "import os; from skills_ref import validate; errors = validate(os.environ['GITHUB_WORKSPACE']); assert errors == [], errors; print('skill spec: OK')"
 
   # 真实上游冒烟：手动触发或每日定时，不阻塞普通 PR
   network-smoke:

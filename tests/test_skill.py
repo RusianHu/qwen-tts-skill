@@ -439,7 +439,10 @@ class TestCliExitCodes:
         return subprocess.run(
             [sys.executable, str(script), *args],
             capture_output=True,
-            text=True,
+            # CLI 已强制 UTF-8 输出；父进程必须显式按 UTF-8 解码，
+            # 否则 Windows runner（cp1252）会因中文帮助文本解码崩溃
+            encoding="utf-8",
+            errors="replace",
             timeout=120,
         )
 
@@ -584,7 +587,8 @@ class TestSkillDistributionLayout:
         proc = subprocess.run(
             [sys.executable, str(dest / "scripts" / "qwen_tts_skill.py"), "--help"],
             capture_output=True,
-            text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
         )
         assert proc.returncode == 0, proc.stderr
