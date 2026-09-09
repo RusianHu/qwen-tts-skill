@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import socket
 import sys
 from pathlib import Path
 
@@ -459,6 +460,135 @@ class TestCliExitCodes:
     def test_mutually_exclusive_flags_exit_2(self):
         proc = self._run("--say", "a", "--list-voices")
         assert proc.returncode == 2
+
+
+class TestRestNonBlocking:
+    """issue #1 验收：慢合成阻塞期间 /health 必须仍能及时响应（event loop 不被占死）。"""
+
+    def test_health_responsive_during_slow_synthesis(self, monkeypatch: pytest.MonkeyPatch):
+        import threading
+        import time
+
+        import requests
+        import uvicorn
+
+        slow_seconds = 1.5
+
+        def fake_slow_synthesize(self, text, voice=None, language=None, max_attempts=None):
+            time.sleep(slow_seconds)
+            return TTSResult(success=True, audio_data=b"RIFFdemo", voice_id="vivian")
+
+        monkeypatch.setattr(QwenTTSBackend, "synthesize", fake_slow_synthesize)
+        monkeypatch.setattr(
+            QwenTTSBackend, "refresh_catalog", lambda self, force=False: True
+        )
+
+        app = skill_module.create_app(upstream_url="https://example.com")
+
+        # 找一个空闲端口
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+        probe.close()
+
+        config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
+        server = uvicorn.Server(config)
+        thread = threading.Thread(target=server.run, daemon=True)
+        thread.start()
+
+        base = f"http://127.0.0.1:{port}"
+        try:
+            # 等服务就绪
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                try:
+                    requests.get(f"{base}/health", timeout=1)
+                    break
+                except requests.RequestException:
+                    time.sleep(0.1)
+            else:
+                pytest.fail("REST 服务 10s 内未就绪")
+
+            # 后台发起慢合成
+            speech_status: dict = {}
+
+            def slow_call():
+                r = requests.post(
+                    f"{base}/v1/audio/speech",
+                    json={"input": "慢合成测试"},
+                    timeout=30,
+                )
+                speech_status["code"] = r.status_code
+
+            worker = threading.Thread(target=slow_call, daemon=True)
+            worker.start()
+
+            time.sleep(0.4)  # 确保合成请求已进入处理
+
+            # 关键断言：合成阻塞期间 /health 必须迅速返回
+            t = time.time()
+            resp = requests.get(f"{base}/health", timeout=5)
+            elapsed = time.time() - t
+
+            assert resp.status_code == 200
+            assert elapsed < slow_seconds / 2, (
+                f"/health 耗时 {elapsed:.2f}s —— event loop 疑似被同步合成阻塞"
+            )
+
+            worker.join(timeout=10)
+            assert speech_status.get("code") == 200
+        finally:
+            server.should_exit = True
+            thread.join(timeout=5)
+
+
+class TestSkillDistributionLayout:
+    """issue #1 验收：skill 可原样复制进客户端 skills 目录并通过结构校验。"""
+
+    def _copy_distribution(self, dest: Path) -> None:
+        import shutil
+
+        dest.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(BASE_DIR / "SKILL.md", dest / "SKILL.md")
+        shutil.copy2(BASE_DIR / "README.md", dest / "README.md")
+        shutil.copytree(
+            BASE_DIR / "scripts",
+            dest / "scripts",
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.egg-info"),
+        )
+
+    def test_install_layout_matches_client_conventions(self, tmp_path: Path):
+        """模拟安装到 Claude Code / Codex 的 skills 目录后，结构与规范一致。"""
+        import re
+
+        # 客户端约定：~/.claude/skills/<name>/ 与 ~/.agents/skills/<name>/
+        for client_dir in (".claude", ".agents"):
+            dest = tmp_path / client_dir / "skills" / "qwen-tts-skill"
+            self._copy_distribution(dest)
+
+            skill_md = (dest / "SKILL.md").read_text(encoding="utf-8")
+            name = re.search(r"^name:\s*(\S+)", skill_md, re.MULTILINE).group(1)
+
+            # 开放规范：name 必须匹配安装目录名
+            assert name == dest.name, f"{client_dir}: name={name} != 目录 {dest.name}"
+            assert (dest / "scripts" / "qwen_tts_skill.py").is_file()
+            assert (dest / "scripts" / "server.py").is_file()
+
+    def test_script_runs_from_installed_location(self, tmp_path: Path):
+        """从安装位置以绝对路径调用 CLI，--help 正常退出（不触网）。"""
+        import subprocess
+
+        dest = tmp_path / ".claude" / "skills" / "qwen-tts-skill"
+        self._copy_distribution(dest)
+
+        proc = subprocess.run(
+            [sys.executable, str(dest / "scripts" / "qwen_tts_skill.py"), "--help"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert "--say" in proc.stdout
 
 
 class TestReleaseConsistency:

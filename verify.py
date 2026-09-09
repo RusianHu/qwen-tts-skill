@@ -8,6 +8,14 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# Windows 控制台默认 GBK/cp936，无法编码本脚本的 ✓/✗/🎉 等符号，
+# 会直接 UnicodeEncodeError 崩溃。统一把 stdio 切到 UTF-8（不可编码时降级替换）。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):  # pragma: no cover - 非 TextIO 场景
+        pass
+
 BASE_DIR = Path(__file__).parent
 SCRIPTS_DIR = BASE_DIR / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:

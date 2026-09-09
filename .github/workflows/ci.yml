@@ -32,18 +32,41 @@ jobs:
           pip install pytest
 
       - name: Self verification (verify.py)
+        env:
+          # Windows runner 控制台默认非 UTF-8，强制一致避免编码崩溃
+          PYTHONIOENCODING: utf-8
         run: python verify.py
 
       - name: Run offline tests
         env:
           # 真实上游冒烟默认隔离，避免免费 Space 波动阻塞 PR
           QWEN_TTS_NETWORK_TESTS: "0"
+          PYTHONIOENCODING: utf-8
         run: pytest tests/test_skill.py -q
 
       - name: Credential boundary checks
         env:
           QWEN_TTS_NETWORK_TESTS: "0"
+          PYTHONIOENCODING: utf-8
         run: pytest tests/test_skill.py -q -k "CredentialBoundary or ReleaseConsistency"
+
+  # Agent Skills 开放规范校验（skills-ref 要求 Python>=3.11，独立小 job）
+  skill-spec:
+    name: Agent Skills validator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install skills-ref (official reference validator)
+        run: pip install "git+https://github.com/agentskills/agentskills#subdirectory=skills-ref"
+
+      - name: Validate skill structure
+        run: |
+          python -c "from skills_ref import validate; errors = validate('.'); assert errors == [], errors; print('skill spec: OK')"
 
   # 真实上游冒烟：手动触发或每日定时，不阻塞普通 PR
   network-smoke:

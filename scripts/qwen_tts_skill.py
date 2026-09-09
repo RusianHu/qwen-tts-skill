@@ -67,6 +67,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Windows 控制台默认 GBK/cp936：--json（ensure_ascii=False）与告警中若含
+# 非 GBK 字符会 UnicodeEncodeError。统一 stdio 走 UTF-8，不可编码时降级替换。
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):  # pragma: no cover - 非 TextIO 场景
+        pass
+
 
 # 上游 Gradio 服务地址。
 # 原地址 `https://qwen-qwen3-tts-demo.ms.show` 已于 2026 年废弃（HTTP 403，
