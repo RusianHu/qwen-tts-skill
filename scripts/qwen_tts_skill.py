@@ -15,6 +15,7 @@ import base64
 import io
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -23,9 +24,40 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+# ---- 核心依赖预检 ----
+# skill 分发到全新环境时依赖通常尚未安装。若不加拦截，用户只会看到裸的
+# `ModuleNotFoundError` traceback，无从得知该装什么。
+# 仅在作为脚本运行时拦截，测试环境仍可正常 import 本模块。
+if __name__ == "__main__":
+    import importlib.util as _importlib_util
+
+    _missing_core = [
+        package_spec
+        for module_name, package_spec in (
+            ("requests", "requests>=2.31.0"),
+            ("gradio_client", "gradio_client>=2.0.0"),
+        )
+        if _importlib_util.find_spec(module_name) is None
+    ]
+    if _missing_core:
+        print(
+            "缺少运行依赖: " + ", ".join(_missing_core) + "\n"
+            "请在当前 skill 根目录执行：\n"
+            "    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt\n"
+            "（skill 不会在运行时自动安装依赖，需手动执行一次。）"
+        )
+        sys.exit(1)
+
 import requests
 from gradio_client import Client
-from pydantic import BaseModel
+
+# pydantic 仅在 REST 模式下用于定义请求体模型，不在核心合成链路上。
+# 这里延迟导入，使核心能力（--say / --list-voices / --list-languages）
+# 只依赖 requests 与 gradio_client，与 requirements 的分层意图一致。
+try:
+    from pydantic import BaseModel
+except ImportError:  # pragma: no cover - 仅在未安装 pydantic 时触发
+    BaseModel = None  # type: ignore[assignment]
 
 # 设置日志
 logging.basicConfig(
@@ -35,18 +67,53 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_UPSTREAM_URL = "https://qwen-qwen3-tts-demo.ms.show"
+# 上游 Gradio 服务地址。
+# 原地址 `https://qwen-qwen3-tts-demo.ms.show` 已于 2026 年废弃（HTTP 403，
+# 提示改走需要 ModelScope token 的 api-inference 地址），故切换到
+# 参数签名完全兼容（/tts_interface + text/voice_display/language_display）
+# 且免鉴权的 HuggingFace Space。
+# 版本号唯一来源。pyproject.toml 中的 version 必须与之保持一致
+# （tests/test_skill.py 中有用例会校验两者不漂移）。
+__version__ = "0.3.0"
+SKILL_VERSION = __version__
+
+DEFAULT_UPSTREAM_URL = "https://qwen-qwen3-tts-demo.hf.space"
+# 保留旧地址常量，便于诊断与回滚。
+LEGACY_UPSTREAM_URL = "https://qwen-qwen3-tts-demo.ms.show"
 DEFAULT_API_NAME = "/tts_interface"
 DEFAULT_MODEL_ID = "qwen-tts"
 DEFAULT_LANGUAGE_ID = "auto"
 DEFAULT_LANGUAGE_NAME = "Auto / 自动"
 DEFAULT_VOICE_NAME = "Vivian / 十三"
+
+# 上游语言 display 名为 `English / 英文` 这样的形式，规范化后是 `english` 全拼，
+# 而调用方（含 SKILL.md 文档）习惯传 `zh` / `en` 这类 ISO 639-1 两字母代码。
+# 没有这张别名表时，传 `zh` 会静默回退成 auto —— 不报错但语言参数不生效。
+LANGUAGE_ALIASES: Dict[str, str] = {
+    "auto": "auto",
+    "zh": "chinese", "cn": "chinese", "zh-cn": "chinese", "zh-hans": "chinese",
+    "zh-tw": "chinese", "zh-hk": "chinese", "chinese": "chinese", "中文": "chinese",
+    "en": "english", "en-us": "english", "en-gb": "english", "english": "english",
+    "ja": "japanese", "jp": "japanese", "japanese": "japanese",
+    "ko": "korean", "kr": "korean", "korean": "korean",
+    "de": "german", "ger": "german", "german": "german",
+    "fr": "french", "fre": "french", "french": "french",
+    "ru": "russian", "rus": "russian", "russian": "russian",
+    "pt": "portuguese", "por": "portuguese", "portuguese": "portuguese",
+    "es": "spanish", "spa": "spanish", "spanish": "spanish",
+    "it": "italian", "ita": "italian", "italian": "italian",
+}
+# 核心依赖：任何调用方式（含 --say / --list-voices）都必须具备。
+CORE_REQUIRED_PACKAGES = {
+    "requests": "requests>=2.31.0",
+    "gradio_client": "gradio_client>=2.0.0",
+}
+# 启动可选 REST 服务时的完整依赖集合（核心依赖 + Web 框架）。
 REST_REQUIRED_PACKAGES = {
     "fastapi": "fastapi>=0.100.0",
     "uvicorn": "uvicorn>=0.20.0",
     "pydantic": "pydantic>=2.0.0",
-    "gradio_client": "gradio_client>=2.0.0",
-    "requests": "requests>=2.31.0",
+    **CORE_REQUIRED_PACKAGES,
 }
 
 
@@ -75,12 +142,47 @@ def build_missing_rest_dependencies_message(missing_dependencies: List[str]) -> 
     )
 
 
-class SpeechRequest(BaseModel):
-    """REST 语音合成请求体。"""
+def get_missing_core_dependencies() -> List[str]:
+    """返回运行核心功能（语音合成/枚举查询）所需但缺失的依赖包列表。"""
+    missing: List[str] = []
 
-    input: str
-    voice: Optional[str] = None
-    language: Optional[str] = DEFAULT_LANGUAGE_ID
+    for module_name, package_spec in CORE_REQUIRED_PACKAGES.items():
+        try:
+            __import__(module_name)
+        except ImportError:
+            missing.append(package_spec)
+
+    return missing
+
+
+def build_missing_core_dependencies_message(missing_dependencies: List[str]) -> str:
+    """构造缺失核心依赖时的统一错误消息。
+
+    skill 分发到一个全新环境时，依赖往往尚未安装。若不加拦截，用户只会看到
+    裸的 `ModuleNotFoundError` traceback，无从得知该装什么。
+    """
+    if not missing_dependencies:
+        return ""
+
+    return (
+        "缺少运行依赖: " + ", ".join(missing_dependencies) + "。\n"
+        "请在当前 skill 根目录执行：\n"
+        "    pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt\n"
+        "（skill 不会在运行时自动安装依赖，需手动执行一次。）"
+    )
+
+
+if BaseModel is not None:
+
+    class SpeechRequest(BaseModel):
+        """REST 语音合成请求体（仅在启用 REST 服务时可用）。"""
+
+        input: str
+        voice: Optional[str] = None
+        language: Optional[str] = DEFAULT_LANGUAGE_ID
+
+else:  # pragma: no cover - 仅在未安装 pydantic 时触发
+    SpeechRequest = None  # type: ignore[assignment]
 
 
 @dataclass
@@ -149,8 +251,12 @@ class QwenTTSBackend:
         self.upstream_url = upstream_url or os.getenv("BASE_URL", DEFAULT_UPSTREAM_URL)
         self.api_name = api_name
         self.api_key = api_key or os.getenv("API_KEY")
+        # 上游重试策略（托管型 Space 偶发抖动），可用环境变量覆盖
+        self.max_attempts = int(os.getenv("QWEN_TTS_MAX_ATTEMPTS", "3"))
+        self.retry_delay = float(os.getenv("QWEN_TTS_RETRY_DELAY", "2"))
         self._voices: Dict[str, str] = {}
         self._languages: Dict[str, str] = {}
+        self._voice_index: Dict[str, str] = {}
         self._default_voice_id: Optional[str] = None
         self._default_language_id: str = DEFAULT_LANGUAGE_ID
         self._default_voice_name: str = DEFAULT_VOICE_NAME
@@ -173,7 +279,17 @@ class QwenTTSBackend:
         return self._default_language_id
 
     def _create_client(self) -> Client:
-        return Client(self.upstream_url)
+        """创建上游客户端。
+
+        这里必须把 api_key 透传给 upstream —— 早期实现只写了
+        `Client(self.upstream_url)`，导致 api_key 存了却从未用于鉴权。
+        """
+        client_kwargs: Dict[str, Any] = {"verbose": False}
+        if self.api_key:
+            client_kwargs["headers"] = {"Authorization": f"Bearer {self.api_key}"}
+        # verbose=False：抑制 gradio_client 往 stdout 打印的 "Loaded as API: ..."，
+        # 否则 CLI 输出会被污染，干扰 agent 解析 --list-voices 等命令的结果。
+        return Client(self.upstream_url, **client_kwargs)
 
     @staticmethod
     def _normalize_option_id(option_label: str) -> str:
@@ -182,6 +298,19 @@ class QwenTTSBackend:
             return ""
         return value.split("/")[0].strip()
 
+    @staticmethod
+    def _canonical_key(value: str) -> str:
+        """把音色/语言名压成不含空格、连字符、下划线的比对键。
+
+        上游存在 `Ono Anna / 日语-小野杏`、`Radio Gol / ...`、`Eldric Sage / ...`
+        这类带空格的 ID，调用方写 `ono-anna` 或 `onoanna` 都应能命中。
+        """
+        value = str(value or "").strip().lower()
+        if not value:
+            return ""
+        value = value.split("/")[0].strip()
+        return re.sub(r"[\s_\-]+", "", value)
+
     def refresh_catalog(self, force: bool = False) -> bool:
         """刷新远端音色 / 语言枚举缓存。"""
         if not force and self._voices and self._languages:
@@ -189,9 +318,13 @@ class QwenTTSBackend:
 
         voices: Dict[str, str] = {}
         languages: Dict[str, str] = {}
-        client = self._create_client()
+        client: Optional[Client] = None
 
         try:
+            # 注意：创建 Client 会立刻请求上游 /config，上游不可达时这里就抛异常。
+            # 早期实现把这一行放在 try 之外，异常直接冒泡，导致 CLI 崩溃、
+            # FastAPI lifespan 失败（服务起不来）。必须纳入 try。
+            client = self._create_client()
             for endpoint in client.endpoints.values():
                 for param in endpoint.parameters_info or []:
                     name = param.get("parameter_name")
@@ -208,13 +341,17 @@ class QwenTTSBackend:
             logger.error("获取远端音色/语言列表失败: %s", exc)
             return False
         finally:
-            try:
-                client.close()
-            except Exception:
-                pass
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
         self._voices = voices
         self._languages = languages
+        self._voice_index = {
+            self._canonical_key(voice_id): voice_id for voice_id in voices
+        }
 
         self._default_voice_id = self._pick_default_voice_id()
         if self._default_voice_id and self._default_voice_id in self._voices:
@@ -258,6 +395,17 @@ class QwenTTSBackend:
         voice_id = (requested_voice or "").strip().lower()
         if voice_id and voice_id in self._voices:
             return voice_id
+
+        # 容错匹配：`ono-anna` / `onoanna` / `Ono Anna` 都能命中 `ono anna`
+        canonical = self._canonical_key(voice_id)
+        if canonical:
+            if not self._voice_index and self._voices:
+                self._voice_index = {
+                    self._canonical_key(vid): vid for vid in self._voices
+                }
+            if canonical in self._voice_index:
+                return self._voice_index[canonical]
+
         return self._default_voice_id or self._pick_default_voice_id()
 
     def _resolve_language_id(self, requested_language: Optional[str]) -> str:
@@ -267,6 +415,18 @@ class QwenTTSBackend:
         language_id = (requested_language or DEFAULT_LANGUAGE_ID).strip().lower()
         if language_id in self._languages:
             return language_id
+
+        # 两字母代码（zh/en/ja…）映射到上游的 english/chinese/… 全拼 ID
+        aliased = LANGUAGE_ALIASES.get(language_id)
+        if aliased and aliased in self._languages:
+            return aliased
+
+        # 兜底：忽略大小写与分隔符差异再比一次
+        canonical = self._canonical_key(language_id)
+        for lang_id in self._languages:
+            if self._canonical_key(lang_id) == canonical:
+                return lang_id
+
         return self._default_language_id or DEFAULT_LANGUAGE_ID
 
     def _resolve_voice_name(self, requested_voice: Optional[str]) -> str:
@@ -309,11 +469,43 @@ class QwenTTSBackend:
         text: str,
         voice: Optional[str] = None,
         language: Optional[str] = None,
+        max_attempts: Optional[int] = None,
     ) -> TTSResult:
-        """直接调用远端 Gradio 接口生成语音。"""
+        """直接调用远端 Gradio 接口生成语音。
+
+        托管型上游（HuggingFace Space）存在偶发失败：实测 49 个音色中有 1 个
+        首次调用报 AppError，重试即成功；也可能出现 SSL 握手超时。因此这里
+        默认带重试，避免把上游抖动直接暴露成调用失败。
+        """
         if not text or not text.strip():
             return TTSResult(success=False, error_message="文本不能为空")
 
+        attempts = max_attempts or self.max_attempts
+        attempts = max(1, int(attempts))
+
+        last_result: Optional[TTSResult] = None
+        for attempt in range(1, attempts + 1):
+            result = self._synthesize_once(text, voice, language)
+            if result.success:
+                return result
+
+            last_result = result
+            if attempt < attempts:
+                logger.warning(
+                    "第 %s/%s 次合成失败，%ss 后重试: %s",
+                    attempt, attempts, self.retry_delay, result.error_message,
+                )
+                time.sleep(self.retry_delay * attempt)
+
+        return last_result or TTSResult(success=False, error_message="合成失败")
+
+    def _synthesize_once(
+        self,
+        text: str,
+        voice: Optional[str] = None,
+        language: Optional[str] = None,
+    ) -> TTSResult:
+        """单次合成尝试（不含重试）。"""
         if not self._voices or not self._languages:
             self.refresh_catalog()
 
@@ -322,10 +514,14 @@ class QwenTTSBackend:
         resolved_voice_name = self._resolve_voice_name(resolved_voice_id)
         resolved_language_name = self._resolve_language_name(resolved_language_id)
 
-        client = self._create_client()
+        client: Optional[Client] = None
         audio_path: Optional[str] = None
 
         try:
+            # 与 refresh_catalog 同理：Client 构造会立即发起网络请求，
+            # 上游超时/不可达时这里就会抛异常，必须纳入 try 才能优雅返回
+            # success=False，否则调用方会直接崩。
+            client = self._create_client()
             logger.info(
                 "开始调用上游合成语音: voice=%s(%s), language=%s(%s)",
                 resolved_voice_id,
@@ -348,10 +544,11 @@ class QwenTTSBackend:
                 error_message=f"上游语音合成失败: {exc}",
             )
         finally:
-            try:
-                client.close()
-            except Exception:
-                pass
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
         try:
             if not audio_path or not os.path.exists(audio_path):
@@ -845,7 +1042,7 @@ def create_app(
     app = FastAPI(
         title="Qwen TTS API",
         description="OpenAI-compatible Text-to-Speech API backed by the internal qwen-tts-skill adapter",
-        version="0.2.1",
+        version=SKILL_VERSION,
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -865,7 +1062,7 @@ def create_app(
     async def index() -> Dict[str, Any]:
         return {
             "name": "Qwen TTS API",
-            "version": "0.2.1",
+            "version": SKILL_VERSION,
             "backend": "internal-gradio-adapter",
             "upstream": backend.upstream_url,
             "independent": True,

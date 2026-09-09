@@ -5,3 +5,4 @@ AGENTS.md
 /__pycache__
 /tests/__pycache__
 /scripts/qwen_tts_skill.egg-info/
+/.workbuddy
