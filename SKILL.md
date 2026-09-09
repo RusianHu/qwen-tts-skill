@@ -1,5 +1,6 @@
 ---
-name: qwen-tts
+name: qwen-tts-skill
+license: MIT
 description: >
   将文本合成为语音（TTS）。当用户要求语音合成、朗读文本、生成音频文件、text-to-speech、tts、语音合成、
   将文字转为语音、读一段文字给我听、生成 wav 音频时触发此技能。内置 49 个音色（含粤语、四川话等方言），
@@ -30,8 +31,12 @@ pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 下面的 `<SKILL_DIR>` 一律替换为**本 skill 的实际安装目录（绝对路径）**。
 脚本是自包含的，可以跨目录用绝对路径直接调用，**不需要先 `cd` 到 skill 目录，也不需要 pip 安装**。
 
-> 注意：写成相对路径（`scripts/qwen_tts_skill.py`）只有当你已在 skill 根目录下才成立，
-> 在其他工作目录会报 `can't open file`。**默认请使用绝对路径。**
+> 注意：
+> - 写成相对路径（`scripts/qwen_tts_skill.py`）只有当你已在 skill 根目录下才成立，
+>   在其他工作目录会报 `can't open file`。**默认请使用绝对路径。**
+> - 安装路径含空格时，shell 里必须给路径加引号：
+>   `python "$SKILL_DIR/scripts/qwen_tts_skill.py" ...`（POSIX）
+>   或 `python "$env:SKILL_DIR\scripts\qwen_tts_skill.py" ...`（PowerShell）。
 
 ### 1. 快速合成单段文本（首选）
 
@@ -185,7 +190,9 @@ cd <SKILL_DIR> && QWEN_TTS_NETWORK_TESTS=1 pytest tests/test_skill.py -q
 - **Python 导入需要显式处理路径**：如需导入，请先把 `<SKILL_DIR>/scripts` 加入 `sys.path`
 - **REST 是可选暴露层**：只有在你显式启动服务时，才会监听本地端口并提供 OpenAI 风格接口
 - **仍然依赖远端上游服务**：实际音频生成由 `BASE_URL` 指向的远端 Qwen TTS Gradio 服务完成
-- **默认上游为 `https://qwen-qwen3-tts-demo.hf.space`**：共 49 个音色、11 种语言；原 `qwen-qwen3-tts-demo.ms.show` 已废弃（403），如需改用 ModelScope 官方 API 请设置 `BASE_URL` + `API_KEY`
+- **默认上游为 `https://qwen-qwen3-tts-demo.hf.space`**：共 49 个音色、11 种语言；原 `qwen-qwen3-tts-demo.ms.show` 已废弃（403）
+- **仅支持 Gradio-compatible 上游**：`BASE_URL` 可换成任何暴露 `/tts_interface`（`text` / `voice_display` / `language_display`）签名的 Gradio 服务；需要鉴权的上游请设置 `QWEN_TTS_UPSTREAM_API_KEY`。**不能**直接指向 ModelScope / DashScope 的 REST 推理 API（协议不同）
+- **本地 REST 密钥与上游凭据分离**：`QWEN_TTS_REST_API_KEY`（或旧变量 `API_KEY`，已废弃）只保护本地服务，**绝不会**发给远端；上游凭据用 `QWEN_TTS_UPSTREAM_API_KEY`
 - **首次调用可能稍慢**：需要探测远端音色/语言列表；HuggingFace Space 冷启动可能额外等待数十秒
 - **输出格式为 24kHz / 单声道 / 16bit WAV**：如需 MP3 等其他格式，可在生成后自行转换
 - **长文本量级参考**：实测单段 1000 字可合成约 4.4 分钟音频（耗时约 6 分钟）；
@@ -193,12 +200,17 @@ cd <SKILL_DIR> && QWEN_TTS_NETWORK_TESTS=1 pytest tests/test_skill.py -q
 - **音色 ID 容错**：匹配时忽略大小写与分隔符，`ono-anna` / `onoanna` 均可命中 `ono anna`；
   传入不存在的音色会回退到默认音色 `vivian`，不会报错
 - **环境变量可配置**：
-  - `BASE_URL`：远端 Qwen TTS 服务地址
-  - `HTTP_HOST`：本地 REST 服务监听地址
+  - `BASE_URL`：远端 Qwen TTS 服务地址（Gradio-compatible）
+  - `QWEN_TTS_UPSTREAM_API_KEY`：上游凭据（默认上游免鉴权，无需配置）
+  - `QWEN_TTS_REST_API_KEY`：本地 REST 鉴权密钥（绝不发送给远端）
+  - `API_KEY`：⚠️ 已废弃，等价于 `QWEN_TTS_REST_API_KEY`；不会发给上游
+  - `HTTP_HOST`：本地 REST 服务监听地址（默认 `127.0.0.1`，暴露外网需显式设置）
   - `HTTP_PORT`：本地 REST 服务监听端口
-  - `API_KEY`：本地 REST API 鉴权密钥；同时作为 `Authorization: Bearer` 透传给上游
+  - `QWEN_TTS_CORS_ORIGINS`：允许的跨域来源（默认关闭 CORS）
   - `QWEN_TTS_MAX_ATTEMPTS`：单次合成最大尝试次数（默认 `3`）
   - `QWEN_TTS_RETRY_DELAY`：重试基础间隔秒数（默认 `2`，按次数递增）
+- **CLI 退出码**：`0` 成功；`1` 合成/上游失败；`2` 参数错误；`3` 配置/依赖错误。
+  配合 `--json` 可让 Agent 稳定解析结果
 - **上游抖动会自动重试**：托管型 Space 偶发失败（实测约 2% 概率），默认重试 3 次即可兜住，无需调用方处理
 - **失败处理**：如果 `result["success"]` 为 `false`，请检查 `result["error"]`
 

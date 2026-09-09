@@ -6,7 +6,7 @@
 
 - 文本转语音能力
 - 音色 / 语言枚举查询
-- 可选的 OpenAI 兼容 REST API
+- 可选的 OpenAI 风格本地 REST 服务（`/v1/audio/speech` 兼容子集，固定返回 WAV）
 - 可嵌入 Python 流程的 skill 级调用方式
 
 ## 安装方式
@@ -183,20 +183,38 @@ curl -X POST http://localhost:8825/v1/audio/speech \
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `HTTP_HOST` | `0.0.0.0` | REST 服务监听地址 |
-| `HTTP_PORT` | `8825` | REST 服务端口 |
-| `BASE_URL` | `https://qwen-qwen3-tts-demo.hf.space` | 远端 Qwen TTS Gradio 服务地址 |
-| `API_KEY` | - | REST API 鉴权密钥（可选）；同时会作为 `Authorization: Bearer` 透传给上游 |
+| `HTTP_HOST` | `127.0.0.1` | REST 服务监听地址（暴露到局域网需显式设为 `0.0.0.0`） |
+| `HTTP_PORT` | `8825` | REST 服务端口（1-65535，非法值回退默认并告警） |
+| `BASE_URL` | `https://qwen-qwen3-tts-demo.hf.space` | 远端 Gradio-compatible TTS 服务地址 |
+| `QWEN_TTS_REST_API_KEY` | - | **本地 REST** 鉴权密钥，只保护本机服务，绝不发送给远端 |
+| `API_KEY` | - | ⚠️ 已废弃，等价于 `QWEN_TTS_REST_API_KEY`；不再作为 Bearer 发给上游 |
+| `QWEN_TTS_UPSTREAM_API_KEY` | - | **上游**凭据，仅在远端 Gradio 服务要求鉴权时配置 |
+| `QWEN_TTS_CORS_ORIGINS` | 空（关闭） | 允许的跨域来源，逗号分隔；默认不启用 CORS |
 | `QWEN_TTS_MAX_ATTEMPTS` | `3` | 单次合成最大尝试次数（上游偶发失败时自动重试） |
 | `QWEN_TTS_RETRY_DELAY` | `2` | 重试基础间隔秒数，按尝试次数递增 |
 
+### 凭据边界
+
+本地 REST 密钥与上游凭据是**两个独立的信任边界**：
+
+```text
+QWEN_TTS_REST_API_KEY      → 只保护 127.0.0.1 的本地服务，绝不离开本机
+QWEN_TTS_UPSTREAM_API_KEY  → 只在访问需要鉴权的上游时作为 Bearer 发送
+```
+
+旧变量 `API_KEY` 仍然可用（视为 `QWEN_TTS_REST_API_KEY`），但会打印废弃告警，
+**且无论哪种情况都不会再被发送给第三方上游**。
+
 > **上游变更说明（2026-09）**
-> 原默认上游 `https://qwen-qwen3-tts-demo.ms.show` 已停止服务（HTTP 403，官方提示改走
-> 需要 ModelScope token 的 `api-inference` 地址）。现默认上游切换为
+> 原默认上游 `https://qwen-qwen3-tts-demo.ms.show` 已停止服务（HTTP 403）。现默认上游切换为
 > `https://qwen-qwen3-tts-demo.hf.space`，其 `/tts_interface` 参数签名
 > （`text` / `voice_display` / `language_display`）与原上游一致，免鉴权，
 > 输出同样为 24kHz / 单声道 / 16bit WAV。
-> 若你有 ModelScope token，可通过 `BASE_URL` 指回官方 API 地址并配置 `API_KEY`。
+>
+> **仅支持 Gradio-compatible 上游**：`BASE_URL` 可以换成任何暴露相同
+> `/tts_interface` 签名的 Gradio 服务（配合 `QWEN_TTS_UPSTREAM_API_KEY` 鉴权）。
+> 不能直接指向 ModelScope / DashScope 的 REST 推理 API —— 那是另一种协议，
+> 如需支持需要单独实现 provider（当前未实现）。
 
 ## 依赖分层
 
@@ -216,7 +234,9 @@ curl -X POST http://localhost:8825/v1/audio/speech \
 - 但已经不再依赖**本地** `qwen-tts2api` 仓库、包安装或其进程启动
 - 当前推荐路径是 **skill 自包含目录 + 绝对路径直接脚本调用**
 - Python 导入模式需要显式把 [`scripts/`](scripts) 加入 `sys.path`
-- OpenAI 风格 REST 能力作为**可选暴露层**保留
+- OpenAI 风格 REST 能力作为**可选暴露层**保留（兼容范围：`input` / `voice` / `language` 字段 + 固定 WAV 输出，未实现 `model` / `response_format` / `speed` 等完整契约）
+- REST 默认只监听 `127.0.0.1` 且关闭 CORS；暴露到局域网/公网需显式配置
+- CLI 有明确退出码（0 成功 / 1 失败 / 2 参数错误 / 3 配置错误），并提供 `--json` 供 Agent 解析
 - 当前实现**不会在运行时自动安装依赖**；缺少依赖时会直接给出明确提示
 - 上游为免费 HuggingFace Space：短文本约 10-15s，1000 字约 6 分钟，且可能休眠冷启动
 

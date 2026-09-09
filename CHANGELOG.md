@@ -3,6 +3,58 @@
 本文件记录项目的显著变更。格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-09-09
+
+针对 [issue #1](https://github.com/RusianHu/qwen-tts-skill/issues/1)（v0.3.1 hardening）
+的安全加固与规范合规版本。无新功能。
+
+### ⚠️ 破坏性变更
+
+- **本地 REST 密钥与上游凭据拆分**（修复凭据边界违规）
+  此前同一个 `API_KEY` 既保护本地 `127.0.0.1` 服务、又作为 `Authorization: Bearer`
+  发给第三方上游——为保护本地端口设置的密码会泄露给远端。现拆分为：
+  - `QWEN_TTS_REST_API_KEY`：只保护本地 REST 服务，**绝不**离开本机
+  - `QWEN_TTS_UPSTREAM_API_KEY`：仅在访问需鉴权的上游时发送
+  - 旧变量 `API_KEY` 降级为 `QWEN_TTS_REST_API_KEY` 的别名（打印废弃告警），
+    **任何情况下都不再发送给上游**
+- **REST 服务默认只监听 `127.0.0.1`**（此前为 `0.0.0.0`），CORS 默认关闭
+  （此前 `allow_origins=["*"]`）。暴露到局域网需显式设置 `HTTP_HOST=0.0.0.0`
+  与 `QWEN_TTS_CORS_ORIGINS`
+- **删除无效公开参数**：`QwenTTSSkill.synthesize(api_key=...)`、
+  `skill_say/skill_voices/skill_languages` 的 `port` 参数此前被静默忽略，现已移除
+- **许可证声明修正**：`LICENSE` 文件实为 Apache-2.0 但 `pyproject.toml`/`README` 声明
+  MIT，现按项目意图统一为 **MIT**（LICENSE 文件已更换为 MIT 文本）
+- **`skill_say` 返回语义**：未指定 `output_path` 时不再丢失音频，返回 base64 data URI
+
+### 修复
+
+- **FastAPI 不再阻塞 event loop**：`/v1/audio/speech` 路由由 `async def` 改为同步 `def`，
+  合成期间 `/health` 等路由可正常响应（此前同步阻塞调用会卡住整个 event loop）
+- **catalog 刷新不再故障放大**：上游不可用时，此前一次合成请求会在多个 resolver 中
+  重复触发 catalog 刷新（随重试倍增）。现收敛为每次尝试最多一次，失败后
+  30 秒（`CATALOG_FAILURE_TTL`）内不再探测
+- **catalog 空结果不再视为成功**：解析结果为空时返回失败并**保留旧缓存**，
+  不再用空数据覆盖有效的音色/语言列表
+- **CLI 失败返回非零退出码**（此前恒为 0）：`0` 成功 / `1` 运行失败 / `2` 参数错误 /
+  `3` 配置依赖错误；新增 `--json` 供 Agent 稳定解析；`--say` 与 `--list-*` 互斥
+- **`QwenTTSService.synthesize()` 自动携带实例 REST key**：服务启用鉴权时不再自请求 401
+- **服务子进程不再用无人消费的 PIPE**：改用 `DEVNULL`，避免日志写满 pipe buffer 阻塞子进程；
+  启动超时/失败路径统一清理子进程（terminate → wait → kill → wait），不再残留占端口进程
+- **环境变量解析加防御**：`QWEN_TTS_MAX_ATTEMPTS` / `QWEN_TTS_RETRY_DELAY` / `HTTP_PORT`
+  非法值回退默认并告警，不再在构造/import 阶段抛异常
+- **文档表述修正**：不再承诺「改 `BASE_URL` 即可调用 ModelScope / DashScope REST API」
+  （实现仅支持 Gradio-compatible 上游）；「OpenAI-compatible」收敛为
+  `/v1/audio/speech` 兼容子集；`SKILL.md` 命令示例补充含空格路径的引号写法
+
+### 新增
+
+- **Agent Skills 规范合规**：`SKILL.md` 的 `name` 改为 `qwen-tts-skill`，
+  与原样克隆的分发目录名一致；frontmatter 增加 `license: MIT`
+- **凭据边界 / 许可证一致性 / skill name 匹配 / CLI 退出码自动测试**
+- **GitHub Actions CI**（`.github/workflows/ci.yml`）：Linux + Windows ×
+  Python 3.10–3.13，运行 pytest（离线）、verify.py 与发布一致性校验；
+  真实上游冒烟单独隔离
+
 ## [0.3.0] - 2026-09-09
 
 ### ⚠️ 破坏性变更
@@ -74,5 +126,6 @@
 
 - 发布自包含 skill 版本，不再依赖外部 `qwen-tts2api` 项目。
 
+[0.3.1]: https://github.com/RusianHu/qwen-tts-skill/releases/tag/v0.3.1
 [0.3.0]: https://github.com/RusianHu/qwen-tts-skill/releases/tag/v0.3.0
 [0.2.1]: https://github.com/RusianHu/qwen-tts-skill/releases/tag/v0.2.1

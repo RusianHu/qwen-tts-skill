@@ -275,12 +275,190 @@ class TestUpstreamFailureIsGraceful:
                 pass
 
         monkeypatch.setattr(skill_module, "Client", FakeClient)
-        backend = QwenTTSBackend(upstream_url="https://example.com", api_key="sk-test")
+        backend = QwenTTSBackend(
+            upstream_url="https://example.com", upstream_api_key="upstream-secret"
+        )
 
         backend._create_client()
 
         assert captured["src"] == "https://example.com"
-        assert captured["kwargs"]["headers"]["Authorization"] == "Bearer sk-test"
+        assert captured["kwargs"]["headers"]["Authorization"] == "Bearer upstream-secret"
+
+
+class TestCredentialBoundary:
+    """凭据边界（P0）：本地 REST 密钥绝不能作为 Bearer 发给远端上游。"""
+
+    class _CaptureClient:
+        """记录构造参数的 fake Client。"""
+
+        instances: list = []
+
+        def __init__(self, src, **kwargs):
+            type(self).instances.append({"src": src, "kwargs": kwargs})
+
+        def close(self):
+            pass
+
+    @pytest.fixture(autouse=True)
+    def _patch_client(self, monkeypatch: pytest.MonkeyPatch):
+        type(self)._CaptureClient.instances = []
+        monkeypatch.setattr(skill_module, "Client", self._CaptureClient)
+
+    def test_local_rest_key_never_reaches_upstream(self, monkeypatch: pytest.MonkeyPatch):
+        """为保护本地端口设的 API_KEY 不得出现在远端请求头里。"""
+        monkeypatch.setenv("API_KEY", "local-secret")
+        monkeypatch.delenv("QWEN_TTS_UPSTREAM_API_KEY", raising=False)
+
+        QwenTTSBackend(upstream_url="https://example.com")._create_client()
+
+        kwargs = self._CaptureClient.instances[0]["kwargs"]
+        assert "Authorization" not in kwargs.get("headers", {})
+
+    def test_explicit_upstream_key_is_sent(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("QWEN_TTS_UPSTREAM_API_KEY", "upstream-secret")
+        monkeypatch.setenv("API_KEY", "local-secret")
+
+        QwenTTSBackend(upstream_url="https://example.com")._create_client()
+
+        headers = self._CaptureClient.instances[0]["kwargs"]["headers"]
+        assert headers["Authorization"] == "Bearer upstream-secret"
+
+    def test_rest_key_resolution_prefers_dedicated_env(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("QWEN_TTS_REST_API_KEY", "rest-key")
+        monkeypatch.setenv("API_KEY", "legacy-key")
+
+        assert skill_module.resolve_rest_api_key() == "rest-key"
+
+    def test_rest_key_falls_back_to_legacy_with_warning(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ):
+        monkeypatch.delenv("QWEN_TTS_REST_API_KEY", raising=False)
+        monkeypatch.setenv("API_KEY", "legacy-key")
+
+        with caplog.at_level("WARNING", logger="qwen_tts_skill"):
+            assert skill_module.resolve_rest_api_key() == "legacy-key"
+
+        assert any("已废弃" in r.message for r in caplog.records)
+
+    def test_service_auto_uses_own_rest_key(self, monkeypatch: pytest.MonkeyPatch):
+        """P1-7：服务启用鉴权时，实例自己的 key 必须自动生效。"""
+        captured: dict = {}
+
+        class FakeResp:
+            status_code = 200
+            headers = {"X-Voice-Id": "vivian", "X-Language-Id": "auto"}
+
+            def raise_for_status(self):
+                return None
+
+            def iter_content(self, chunk_size=None):
+                yield b"RIFFdemo"
+
+        def fake_post(url, json=None, headers=None, **kwargs):
+            captured["headers"] = headers
+            return FakeResp()
+
+        monkeypatch.setattr(skill_module.requests, "post", fake_post)
+        monkeypatch.setattr(
+            skill_module.QwenTTSService, "is_running", property(lambda self: True)
+        )
+        service = skill_module.QwenTTSService(port=18830, api_key="my-rest-key")
+        service._voices = {"vivian": "Vivian / 十三"}
+
+        result = service.synthesize("你好")
+
+        assert result.success is True
+        assert captured["headers"]["Authorization"] == "Bearer my-rest-key"
+
+
+class TestCatalogFailureAmplification:
+    """P1-5/P2-14：上游故障时 catalog 刷新不得被 resolver 放大。"""
+
+    def test_refresh_catalog_counts_are_bounded_when_upstream_down(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        calls = {"n": 0}
+
+        def boom(*args, **kwargs):
+            calls["n"] += 1
+            raise RuntimeError("upstream down")
+
+        backend = QwenTTSBackend(upstream_url="https://unreachable.invalid")
+        backend.max_attempts = 3
+        backend.retry_delay = 0
+        monkeypatch.setattr(backend, "_create_client", boom)
+
+        result = backend.synthesize("你好", "vivian", "zh")
+
+        assert result.success is False
+        # 一次合成（含 3 次重试）+ 显式 ensure —— 不能随 resolver 数量倍增
+        assert calls["n"] <= 4, f"catalog fetch 被放大到 {calls['n']} 次"
+
+    def test_empty_catalog_result_keeps_old_cache(self, monkeypatch: pytest.MonkeyPatch):
+        backend = QwenTTSBackend(upstream_url="https://example.com")
+        backend._voices = {"vivian": "Vivian / 十三"}
+        backend._languages = {"auto": "Auto / 自动"}
+        backend._voice_index = {backend._canonical_key("vivian"): "vivian"}
+
+        class EmptyClient:
+            endpoints: dict = {}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(backend, "_create_client", lambda: EmptyClient())
+
+        assert backend.refresh_catalog(force=True) is False
+        assert backend.voices == {"vivian": "Vivian / 十三"}, "空结果不得清空有效缓存"
+
+    def test_catalog_backoff_skips_repeated_probes(self, monkeypatch: pytest.MonkeyPatch):
+        calls = {"n": 0}
+
+        def boom(*args, **kwargs):
+            calls["n"] += 1
+            raise RuntimeError("down")
+
+        backend = QwenTTSBackend(upstream_url="https://unreachable.invalid")
+        monkeypatch.setattr(backend, "_create_client", boom)
+
+        backend.ensure_catalog()
+        backend.ensure_catalog()
+        backend.ensure_catalog()
+
+        assert calls["n"] == 1, "失败后的 TTL 内不应重复探测上游"
+
+
+class TestCliExitCodes:
+    """P1-6：CLI 失败必须返回非零退出码，供 Agent / shell 判断。"""
+
+    def _run(self, *args):
+        import subprocess
+
+        script = BASE_DIR / "scripts" / "qwen_tts_skill.py"
+        return subprocess.run(
+            [sys.executable, str(script), *args],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    def test_say_failure_returns_nonzero(self, monkeypatch: pytest.MonkeyPatch):
+        # 用一个必然连不上的上游地址，走真实 CLI 进程
+        proc = self._run(
+            "--say", "测试", "--base-url", "https://unreachable.invalid", "--json"
+        )
+        assert proc.returncode != 0, f"合成失败应返回非零，实际 {proc.returncode}"
+        assert '"success": false' in proc.stdout.replace("False", "false").lower() or "失败" in proc.stdout
+
+    def test_list_voices_failure_returns_nonzero(self):
+        proc = self._run(
+            "--list-voices", "--base-url", "https://unreachable.invalid", "--json"
+        )
+        assert proc.returncode != 0
+
+    def test_mutually_exclusive_flags_exit_2(self):
+        proc = self._run("--say", "a", "--list-voices")
+        assert proc.returncode == 2
 
 
 class TestReleaseConsistency:
@@ -303,6 +481,41 @@ class TestReleaseConsistency:
 
         assert re.match(r"^\d+\.\d+\.\d+$", skill_module.__version__), (
             f"版本号不符合语义化格式: {skill_module.__version__}"
+        )
+
+    def test_license_declared_consistently(self):
+        """P0-2：LICENSE 文件、pyproject、README 的许可证声明必须一致。"""
+        license_text = (BASE_DIR / "LICENSE").read_text(encoding="utf-8")
+
+        pyproject = (BASE_DIR / "pyproject.toml").read_text(encoding="utf-8")
+        readme = (BASE_DIR / "README.md").read_text(encoding="utf-8")
+
+        is_mit = "MIT License" in license_text
+        is_apache = "Apache License" in license_text
+        assert is_mit != is_apache, "LICENSE 文件内容无法唯一判定许可证类型"
+
+        if is_mit:
+            declared = "MIT"
+            assert "Apache License" not in license_text[:200]
+        else:
+            declared = "Apache-2.0"
+            assert "Apache License" in license_text[:200]
+
+        assert f'license = {{text = "{declared}"}}' in pyproject, (
+            f"pyproject.toml 声明的许可证与 LICENSE 文件（{declared}）不一致"
+        )
+        assert declared in readme, f"README 中缺少 {declared} 许可证声明"
+
+    def test_skill_name_matches_distribution_dir(self):
+        """P1-3：Agent Skills 规范要求 frontmatter name 与分发目录名一致。"""
+        import re
+
+        skill_md = (BASE_DIR / "SKILL.md").read_text(encoding="utf-8")
+        match = re.search(r"^name:\s*(\S+)", skill_md, re.MULTILINE)
+
+        assert match is not None, "SKILL.md 缺少 name 字段"
+        assert match.group(1) == BASE_DIR.name, (
+            f"SKILL.md name={match.group(1)!r} 与分发目录名 {BASE_DIR.name!r} 不一致"
         )
 
 

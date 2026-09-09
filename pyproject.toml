@@ -1,8 +1,8 @@
 [project]
 name = "qwen-tts-skill"
 # 必须与 scripts/qwen_tts_skill.py 中的 __version__ 保持一致
-version = "0.3.0"
-description = "Independent Python REST skill for Qwen TTS with an internal OpenAI-compatible adapter"
+version = "0.3.1"
+description = "Independent Python skill for Qwen TTS with an optional OpenAI-style /v1/audio/speech compatibility subset"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
